@@ -37,20 +37,22 @@ def main() -> None:
     vectors, labels, used = [], [], 0
     for path in system_fonts() + sys.argv[1:]:
         try:
+            missing = render(path, "\uffff")  # what this font draws for a glyph it lacks
             glyphs = [render(path, c) for c in TEMPLATE_CLASSES]
         except Exception:
             continue
-        if any(g is None for g in glyphs):
-            continue
-        # Fonts without Latin glyphs draw the same placeholder box for everything.
-        if float(glyphs[0] @ glyphs[-1]) > 0.9 and float(glyphs[1] @ glyphs[2]) > 0.9:
-            continue
+        if glyphs[0] is None or glyphs[11] is None or float(glyphs[0] @ glyphs[11]) > 0.9:
+            continue  # no Latin letters in this font
         used += 1
         for index, glyph in enumerate(glyphs):
+            if glyph is None or (missing is not None and float(glyph @ missing) > 0.95):
+                continue
             vectors.append(np.round(glyph * 127 / np.abs(glyph).max()).astype(np.int8))
             labels.append(index)
     np.savez_compressed(TEMPLATE_PATH, vectors=np.array(vectors), labels=np.array(labels, np.uint8))
+    counts = np.bincount(labels, minlength=len(TEMPLATE_CLASSES))
     print(f"{used} fonts -> {len(vectors)} templates -> {TEMPLATE_PATH}")
+    print("per class:", dict(zip(TEMPLATE_CLASSES, counts.tolist())))
 
 
 if __name__ == "__main__":

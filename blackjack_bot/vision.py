@@ -20,9 +20,12 @@ import cv2
 import numpy as np
 
 VALID_RANKS = {"A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"}
-# "1" and "0" catch the halves of a "10" whose digits were not seen together:
-# a lone "1" can only be a ten; a lone "0" is rejected rather than misread.
-TEMPLATE_CLASSES = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "J", "Q", "K", "1", "0"]
+# Besides the ranks there are helper classes: "1" and "0" (the digits of a ten
+# seen separately), "10" (its digits touching) and the suit symbols, which are
+# recognised so they can be skipped instead of being mistaken for a rank.
+SUITS = ["\u2660", "\u2665", "\u2666", "\u2663"]
+TEMPLATE_CLASSES = (["A", "2", "3", "4", "5", "6", "7", "8", "9", "J", "Q", "K", "1", "0", "10"]
+                    + SUITS)
 TEMPLATE_PATH = Path(__file__).with_name("rank_templates.npz")
 TARGET_CARD_HEIGHT = 300
 MIN_SCORE = 0.55  # minimum similarity to the best template
@@ -56,9 +59,10 @@ def _load_templates() -> tuple[np.ndarray, np.ndarray]:
 
 
 def classify_glyph(gray: np.ndarray) -> str:
-    """Recognise one rank glyph (dark ink on white). Returns a rank or ''.
+    """Recognise one glyph (dark ink on white).
 
-    An uncertain match returns '' rather than a guess: wrong cards would mean
+    Returns a rank, "1" or "0" (half of a ten), "suit", or "" when unsure.
+    An uncertain match is never turned into a guess: wrong cards would mean
     wrong advice.
     """
     vector = glyph_vector(gray)
@@ -71,13 +75,14 @@ def classify_glyph(gray: np.ndarray) -> str:
     scores = vectors @ vector
     per_class = np.full(len(TEMPLATE_CLASSES), -1.0)
     np.maximum.at(per_class, labels, scores)
-    order = np.argsort(per_class)[::-1]
-    best = TEMPLATE_CLASSES[order[0]]
-    confident = (per_class[order[0]] >= MIN_SCORE
-                 and per_class[order[0]] - per_class[order[1]] >= MIN_MARGIN)
-    if best == "1":
-        best = "10"
-    result = best if confident and best in VALID_RANKS else ""
+    # All four suits count as one answer, so they don't compete with each other.
+    first_suit = len(TEMPLATE_CLASSES) - len(SUITS)
+    merged = np.append(per_class[:first_suit], per_class[first_suit:].max())
+    names = TEMPLATE_CLASSES[:first_suit] + ["suit"]
+    order = np.argsort(merged)[::-1]
+    confident = (merged[order[0]] >= MIN_SCORE
+                 and merged[order[0]] - merged[order[1]] >= MIN_MARGIN)
+    result = names[order[0]] if confident else ""
     if len(_cache) > 5000:
         _cache.clear()
     _cache[key] = result
@@ -87,20 +92,26 @@ def classify_glyph(gray: np.ndarray) -> str:
 def _card_blobs(bgr: np.ndarray) -> list[tuple[tuple[int, int, int, int], np.ndarray]]:
     """Return (bounding box, filled mask) for each card-face blob."""
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    white = ((hsv[..., 1] < 70) & (hsv[..., 2] > 165)).astype(np.uint8) * 255
+    white = ((hsv[..., 1] < 70) & (hsv[..., 2] > 190)).astype(np.uint8) * 255
     white = cv2.morphologyEx(white, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     contours, _ = cv2.findContours(white, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     region_h = bgr.shape[0]
     blobs = []
     for contour in contours:
         x, y, w, h = cv2.boundingRect(contour)
-        if h < max(30, 0.2 * region_h) or w < 0.3 * h:
+        if h < max(24, 0.15 * region_h) or w < 0.3 * h:
             continue
         if cv2.contourArea(contour) < 0.5 * w * h:
             continue
         mask = np.zeros(white.shape, np.uint8)
-        cv2.drawContours(mask, [contour], -1, 255, cv2.FILLED)
+        # Fill the convex hull, not the raw outline: ink that touches the card's
+        # edge would otherwise open a notch and fall outside the card.
+        cv2.drawContours(mask, [cv2.convexHull(contour)], -1, 255, cv2.FILLED)
         blobs.append(((x, y, w, h), mask))
+    # Cards in one area are the same size; much shorter white shapes are
+    # something else, such as a badge showing the hand total.
+    tallest = max((b[0][3] for b in blobs), default=0)
+    blobs = [b for b in blobs if b[0][3] >= 0.7 * tallest]
     blobs.sort(key=lambda b: b[0][0])
     return blobs, white
 
@@ -127,41 +138,46 @@ def read_ranks(bgr: np.ndarray, debug: list | None = None) -> list[str]:
             # off. A clipped rank can look like another one: don't read it.
             ranks.append((x, "?"))
             continue
-        band_h = int(0.40 * h)
-        ink = cv2.bitwise_and(mask, cv2.bitwise_not(white))[y:y + band_h, x:x + w]
+        band_h = int(0.55 * h)
+        # Ignore a thin rim: there the card's own edge and shadow would join
+        # glyphs to the background.
+        rim = max(1, int(0.025 * h))
+        inner = cv2.erode(mask, np.ones((2 * rim + 1, 2 * rim + 1), np.uint8))
+        ink = cv2.bitwise_and(inner, cv2.bitwise_not(white))[y:y + band_h, x:x + w]
         face = white[y:y + band_h, x:x + w]
         # Darkest channel: black and red ink both come out dark on a white face.
         dark = np.where(mask > 0, bgr.min(axis=2), 255).astype(np.uint8)[y:y + band_h, x:x + w]
         count, _, stats, _ = cv2.connectedComponentsWithStats(ink, connectivity=8)
         glyphs = []
         for gx, gy, gw, gh, area in stats[1:count]:
-            if not 0.07 * h <= gh <= 0.30 * h or gw > 0.25 * h or area < 0.15 * gw * gh:
+            if not 0.07 * h <= gh <= 0.48 * h or not 0.035 * h <= gw <= 0.6 * h or area < 0.15 * gw * gh:
                 continue
             if gy + gh >= band_h:  # cut by the strip: a centre pip, not an index
                 continue
             glyphs.append([int(gx), int(gy), int(gw), int(gh), 1])
-        glyphs = [g for g in glyphs if _is_index(g, glyphs, face, h)]
-        glyphs.sort()
-        merged: list[list[int]] = []
-        for g in glyphs:
-            last = merged[-1] if merged else None
-            if last and g[0] - (last[0] + last[2]) < 0.4 * g[3] and abs(g[1] - last[1]) < 0.3 * g[3]:
-                x2 = max(last[0] + last[2], g[0] + g[2])
-                y2 = max(last[1] + last[3], g[1] + g[3])
-                last[0], last[1] = min(last[0], g[0]), min(last[1], g[1])
-                last[2], last[3], last[4] = x2 - last[0], y2 - last[1], last[4] + 1
-            else:
-                merged.append(list(g))
-        for gx, gy, gw, gh, parts in merged:
-            if parts >= 2:
-                rank = "10"  # the only two-glyph rank
-            else:
-                pad = 2
-                crop = dark[max(0, gy - pad):gy + gh + pad, max(0, gx - pad):gx + gw + pad]
-                rank = classify_glyph(crop) or "?"
-            ranks.append((x + gx, rank))
+        glyphs = sorted(g for g in glyphs if _is_index(g, glyphs, face, h))
+        found = []
+        for gx, gy, gw, gh, _ in glyphs:
+            pad = 2
+            crop = dark[max(0, gy - pad):gy + gh + pad, max(0, gx - pad):gx + gw + pad]
+            name = classify_glyph(crop)
+            if name != "suit":  # a suit printed beside the rank is not a card
+                found.append((gx, gy, gw, gh, name))
+        index = 0
+        while index < len(found):
+            gx, gy, gw, gh, name = found[index]
+            if name == "1":
+                # A ten: swallow its "0", which may be partly hidden by the next card.
+                nxt = found[index + 1] if index + 1 < len(found) else None
+                if nxt and nxt[4] in ("0", "") and nxt[0] - (gx + gw) < 0.6 * gh:
+                    index += 1
+                name = "10"
+            elif name not in VALID_RANKS:  # unsure, or a stray "0"
+                name = "?"
+            ranks.append((x + gx, name))
             if debug is not None:
-                debug.append((x + gx, y + gy, gw, gh, rank))
+                debug.append((x + gx, y + gy, gw, gh, name))
+            index += 1
     return [rank for _, rank in sorted(ranks)]
 
 
@@ -176,7 +192,7 @@ def _is_index(glyph, glyphs, face: np.ndarray, card_h: int) -> bool:
     gap = 0
     while gap < len(column) and column[len(column) - 1 - gap]:
         gap += 1
-    return gap <= 0.11 * card_h
+    return gap <= 0.20 * card_h
 
 
 def grab(sct, box: list[int]) -> np.ndarray:

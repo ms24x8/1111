@@ -186,6 +186,9 @@ class App:
         self.pause_button = tk.Button(buttons, text="Pause", command=self.toggle_pause)
         self.pause_button.pack(side="left", expand=True, fill="x", padx=2)
 
+        tk.Button(root, text="Save what I see (for troubleshooting)",
+                  command=self.save_debug).pack(fill="x", padx=12, pady=2)
+
         settings = tk.Frame(root, bg=BG)
         settings.pack(fill="x", padx=10, pady=2)
         self.decks = tk.IntVar(value=decks)
@@ -257,6 +260,27 @@ class App:
         self.shown = None
         if self.paused:
             self.status.configure(text="Paused: not reading the screen or counting.")
+
+    def save_debug(self) -> None:
+        """Save each card area exactly as the bot sees it, with what it read."""
+        if not self.regions:
+            self.status.configure(text="Set up the card areas first.")
+            return
+        import cv2
+
+        from .vision import grab, read_ranks
+
+        folder = self.config.resolve().parent / "debug"
+        folder.mkdir(exist_ok=True)
+        boxes = {"dealer": self.regions["dealer"], "player": self.regions["player"]}
+        boxes.update({f"other{i}": box for i, box in enumerate(self.regions.get("others", []))})
+        lines = []
+        for name, box in boxes.items():
+            image = grab(self.sct, box)
+            cv2.imwrite(str(folder / f"{name}.png"), image)
+            lines.append(f"{name}: read {read_ranks(image)}  area {box}")
+        (folder / "read.txt").write_text("\n".join(lines) + "\n")
+        self.status.configure(text=f"Saved to {folder}")
 
     def calibrate(self) -> None:
         self.root.withdraw()  # get out of the screenshot

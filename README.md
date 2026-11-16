@@ -79,6 +79,22 @@ python -m blackjack_bot image shot.png --dealer 440,40,420,260 --player 440,400,
 `advise` works from cards you type; `image` analyses a saved screenshot, which
 is the quickest way to check that your game's cards are recognised.
 
+## Live-dealer tables
+
+Live tables (a video of a real dealer) show two kinds of cards:
+
+- **Small on-screen cards** for the dealer and for your own hand. These are
+  what the bot reads. Box just those small cards when setting up; leave the
+  total badge and the video out as far as you can.
+- **Physical cards on the video table** for the other seats. These are tilted,
+  small and blurred by the video, and the bot cannot read them. Do not box
+  them. The count then uses the dealer's cards and yours only. It is still
+  mathematically correct, just built from fewer cards, so it moves more slowly.
+
+If the window shows the wrong cards or CAN'T READ, click **Save what I see**.
+It writes each card area as a picture, plus what was read, into a `debug`
+folder next to the bot, which shows exactly what went wrong.
+
 ## What to know
 
 - **Counting only helps with a real shoe** (live-dealer or physical tables).
@@ -89,8 +105,8 @@ is the quickest way to check that your game's cards are recognised.
   counting against the old shoe. It warns if it sees more of a card than the
   shoe can hold.
 - The count starts when the bot starts. Cards dealt before that are unknown.
-- Card recognition expects light card faces with the rank in the top-left
-  corner, side by side or fanned sideways. A card it is not sure about is
+- Card recognition expects upright, light card faces with the rank in the
+  top-left corner, side by side or overlapping sideways. A card it is not sure about is
   shown as `?` and no advice is given, rather than guessing. It has been tested
   on rendered tables, not on every casino skin: check yours with `image` first.
 - One hand of yours is read. After a split, use `advise` for each hand.
