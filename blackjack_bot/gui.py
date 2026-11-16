@@ -6,6 +6,7 @@ Start it with `python -m blackjack_bot` (or double-click the start script).
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tkinter as tk
 from pathlib import Path
@@ -19,6 +20,8 @@ ACTION_COLOUR = {
     "hit": "#2f9e5b", "stand": "#d6453d", "double": "#2f7fd6", "split": "#8a55d8",
     "surrender": "#6b7480", "blackjack": "#c99a14", "bust": "#6b7480",
 }
+# Tk's fullscreen mode crashes on macOS ("Python quit unexpectedly").
+USE_FULLSCREEN = sys.platform != "darwin" and not os.environ.get("BLACKJACK_NO_FULLSCREEN")
 SMALL, BODY, MONO = ("Arial", 10), ("Arial", 12), ("Courier", 12)
 
 
@@ -49,15 +52,28 @@ def select_regions(parent: tk.Misc | None, monitor_index: int = 1) -> dict | Non
     image = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
 
     window = tk.Toplevel(parent) if parent else tk.Tk()
-    window.attributes("-fullscreen", True)
-    window.attributes("-topmost", True)
     view_w, view_h = window.winfo_screenwidth(), window.winfo_screenheight()
-    scale = max(image.width / view_w, image.height / view_h)
-    shown = image.resize((round(image.width / scale), round(image.height / scale)))
+    if USE_FULLSCREEN:
+        window.attributes("-fullscreen", True)
+    else:
+        # macOS: Tk's fullscreen mode can abort the whole program, so use an
+        # ordinary window the size of the screen instead.
+        window.title("Blackjack advisor: mark the card areas")
+        window.geometry(f"{view_w}x{view_h}+0+0")
+    window.attributes("-topmost", True)
+    # Screen-capture units per window unit (1 except on unusual display setups;
+    # on Retina Macs both are "points" even though the screenshot has more pixels).
+    units = monitor["width"] / view_w
+    shown = image.resize((view_w, round(image.height * view_w / image.width)))
     photo = ImageTk.PhotoImage(shown, master=window)
     canvas = tk.Canvas(window, width=view_w, height=view_h, highlightthickness=0, cursor="cross")
     canvas.pack()
-    canvas.create_image(0, 0, image=photo, anchor="nw")
+    picture = canvas.create_image(0, 0, image=photo, anchor="nw")
+    window.update()  # show the window so we know where the canvas really is
+    # Shift the screenshot so every pixel sits exactly over the real thing, even
+    # when a title bar or menu bar pushes the canvas down.
+    origin_x, origin_y = canvas.winfo_rootx(), canvas.winfo_rooty()
+    canvas.coords(picture, -origin_x, -origin_y)
     canvas.create_rectangle(0, 0, view_w, 44, fill="black", outline="")
     banner = canvas.create_text(view_w // 2, 22, fill="yellow", font=("Arial", 15, "bold"))
 
@@ -92,9 +108,9 @@ def select_regions(parent: tk.Misc | None, monitor_index: int = 1) -> dict | Non
         if w < 10 or h < 10:
             canvas.delete(state["rect"])
             return
-        box = [monitor["left"] + round(min(x0, event.x) * scale),
-               monitor["top"] + round(min(y0, event.y) * scale),
-               round(w * scale), round(h * scale)]
+        box = [monitor["left"] + round((origin_x + min(x0, event.x)) * units),
+               monitor["top"] + round((origin_y + min(y0, event.y)) * units),
+               round(w * units), round(h * units)]
         if len(boxes) < len(steps):
             boxes[steps[len(boxes)][0]] = box
         else:
@@ -283,14 +299,25 @@ class App:
         self.status.configure(text=f"Saved to {folder}")
 
     def calibrate(self) -> None:
-        self.root.withdraw()  # get out of the screenshot
+        # Get out of the screenshot. On macOS the window is made invisible
+        # rather than withdrawn, which Tk handles more reliably there.
+        if sys.platform == "darwin":
+            self.root.attributes("-alpha", 0.0)
+        else:
+            self.root.withdraw()
         self.root.after(350, self._calibrate_now)
 
     def _calibrate_now(self) -> None:
         try:
             regions = select_regions(self.root)
+        except Exception as exc:
+            regions = None
+            self.status.configure(text=f"Could not set up the card areas: {exc}")
         finally:
-            self.root.deiconify()
+            if sys.platform == "darwin":
+                self.root.attributes("-alpha", 1.0)
+            else:
+                self.root.deiconify()
         if regions:
             self.regions = regions
             self.config.write_text(json.dumps(regions, indent=2))
