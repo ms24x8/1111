@@ -1,4 +1,4 @@
-"""Command line entry point: python -m blackjack_bot <command>."""
+"""Blackjack advisor. Run with no arguments to open the window."""
 
 from __future__ import annotations
 
@@ -28,17 +28,6 @@ def _parse_box(text: str) -> list[int]:
     if len(box) != 4:
         raise argparse.ArgumentTypeError("region must be x,y,w,h")
     return box
-
-
-def _enable_dpi_awareness() -> None:
-    """Make window coordinates match screenshot pixels on scaled Windows displays."""
-    if sys.platform == "win32":
-        import ctypes
-
-        try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(2)
-        except Exception:
-            pass
 
 
 # --------------------------------------------------------------------------
@@ -117,97 +106,13 @@ def _count_text(shoe: Shoe, rules: Rules) -> str:
 # --------------------------------------------------------------------------
 
 def cmd_calibrate(args) -> int:
-    import tkinter as tk
+    from .gui import enable_dpi_awareness, select_regions
 
-    import mss
-    from PIL import Image, ImageTk
-
-    _enable_dpi_awareness()
-    with (mss.MSS() if hasattr(mss, "MSS") else mss.mss()) as sct:
-        monitor = sct.monitors[args.monitor]
-        shot = sct.grab(monitor)
-    image = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
-
-    root = tk.Tk()
-    root.attributes("-fullscreen", True)
-    root.attributes("-topmost", True)
-    view_w, view_h = root.winfo_screenwidth(), root.winfo_screenheight()
-    scale = max(image.width / view_w, image.height / view_h)
-    shown = image.resize((round(image.width / scale), round(image.height / scale)))
-    photo = ImageTk.PhotoImage(shown)
-    canvas = tk.Canvas(root, width=view_w, height=view_h, highlightthickness=0, cursor="cross")
-    canvas.pack()
-    canvas.create_image(0, 0, image=photo, anchor="nw")
-
-    steps = [("dealer's", "#ff4040"), ("your own", "#40c0ff")]
-    boxes: dict[str, list[int]] = {}
-    others: list[list[int]] = []
-    canvas.create_rectangle(0, 0, view_w, 44, fill="black", outline="")
-    banner = canvas.create_text(view_w // 2, 22, fill="yellow", font=("Arial", 15, "bold"))
-    state = {"start": None, "rect": None}
-
-    def prompt():
-        if len(boxes) < len(steps):
-            name = steps[len(boxes)][0]
-            text = f"Drag a box around the {name.upper()} card area   (Esc = cancel)"
-        else:
-            text = (f"Now box each OTHER PLAYER's cards ({len(others)} added)   "
-                    "Enter or right-click = done")
-        canvas.itemconfigure(banner, text=text)
-
-    def press(event):
-        state["start"] = (event.x, event.y)
-        colour = steps[len(boxes)][1] if len(boxes) < len(steps) else "#60ff60"
-        state["rect"] = canvas.create_rectangle(event.x, event.y, event.x, event.y,
-                                                outline=colour, width=3)
-
-    def drag(event):
-        if state["start"]:
-            canvas.coords(state["rect"], *state["start"], event.x, event.y)
-
-    def release(event):
-        if not state["start"]:
-            return
-        (x0, y0), state["start"] = state["start"], None
-        x1, y1 = event.x, event.y
-        w, h = abs(x1 - x0), abs(y1 - y0)
-        if w < 10 or h < 10:
-            canvas.delete(state["rect"])
-            return
-        box = [
-            monitor["left"] + round(min(x0, x1) * scale),
-            monitor["top"] + round(min(y0, y1) * scale),
-            round(w * scale),
-            round(h * scale),
-        ]
-        if len(boxes) < len(steps):
-            boxes[("dealer", "player")[len(boxes)]] = box
-        else:
-            others.append(box)
-        prompt()
-
-    def finish(_event):
-        if len(boxes) == len(steps):
-            root.destroy()
-
-    canvas.bind("<ButtonPress-1>", press)
-    canvas.bind("<B1-Motion>", drag)
-    canvas.bind("<ButtonRelease-1>", release)
-    def cancel(_event):
-        boxes.clear()
-        root.destroy()
-
-    root.bind("<Escape>", cancel)
-    root.bind("<Return>", finish)
-    canvas.bind("<ButtonPress-3>", finish)
-    root.focus_force()
-    prompt()
-    root.mainloop()
-
-    if len(boxes) < len(steps):
+    enable_dpi_awareness()
+    boxes = select_regions(None, args.monitor)
+    if boxes is None:
         print("Calibration cancelled.")
         return 1
-    boxes["others"] = others
     args.config.write_text(json.dumps(boxes, indent=2))
     print(f"Saved regions to {args.config}: {boxes}")
     return 0
@@ -218,106 +123,60 @@ def cmd_calibrate(args) -> int:
 # --------------------------------------------------------------------------
 
 def cmd_run(args) -> int:
-    import mss
+    if not args.no_overlay:
+        try:
+            from .gui import App
 
+            app = App(args.config, _rules(args), args.decks, not args.no_count, args.interval)
+        except Exception as exc:  # no display / no tkinter: fall back to the terminal
+            print(f"(window unavailable: {exc}; printing to the terminal instead)")
+        else:
+            app.run()
+            return 0
+    return _run_in_terminal(args)
+
+
+def _run_in_terminal(args) -> int:
+    from .gui import enable_dpi_awareness, open_screen_capture
     from .vision import grab, read_ranks
 
     if not args.config.exists():
         print(f"{args.config} not found - run `python -m blackjack_bot calibrate` first.",
               file=sys.stderr)
         return 1
-    _enable_dpi_awareness()
+    enable_dpi_awareness()
     regions = json.loads(args.config.read_text())
     rules = _rules(args)
     tracker = None if args.no_count else Tracker(args.decks)
-    sct = mss.MSS() if hasattr(mss, "MSS") else mss.mss()
-    state = {"pending": None, "shown": None}
-
-    def poll() -> str | None:
-        """Return new text to show, or None if nothing changed."""
-        areas = {"dealer": read_ranks(grab(sct, regions["dealer"])),
-                 "player": read_ranks(grab(sct, regions["player"]))}
-        for index, box in enumerate(regions.get("others", [])):
-            areas[f"other{index}"] = read_ranks(grab(sct, box))
-        seen = tuple(tuple(ranks) for ranks in areas.values())
-        # Require two identical reads in a row so mid-animation frames are ignored.
-        stable = seen == state["pending"]
-        state["pending"] = seen
-        if not stable or seen == state["shown"]:
-            return None
-        state["shown"] = seen
-        if tracker is None:
-            return _advice_text(areas["player"], areas["dealer"], rules)
-        tracker.observe(areas)
-        shoe = tracker.current_shoe()
-        text = _advice_text(areas["player"], areas["dealer"], rules, shoe.probs())
-        text += "\n" + _count_text(shoe, rules)
-        if tracker.overdrawn:
-            text += "\n!! Saw more cards than the shoe holds - reshuffled? Reset the count."
-        return text
-
-    def reset():
-        if tracker is not None:
-            tracker.reset()
-            state["shown"] = None
-            print("-- count reset: new shoe --\n")
-
-    window = None
-    if not args.no_overlay:
-        try:
-            window = _Overlay(reset if tracker is not None else None)
-        except Exception as exc:  # no display / no tkinter: fall back to the terminal
-            print(f"(overlay unavailable: {exc}; printing to the terminal instead)")
-
+    sct = open_screen_capture()
+    pending = shown = None
     print("Watching the screen. Ctrl+C to stop.")
     try:
-        if window:
-            def tick():
-                text = poll()
-                if text:
-                    print(text + "\n")
-                    window.show(text)
-                window.root.after(int(args.interval * 1000), tick)
-
-            tick()
-            window.root.mainloop()
-        else:
-            while True:
-                text = poll()
-                if text:
-                    print(text + "\n", flush=True)
-                time.sleep(args.interval)
+        while True:
+            areas = {"dealer": read_ranks(grab(sct, regions["dealer"])),
+                     "player": read_ranks(grab(sct, regions["player"]))}
+            for index, box in enumerate(regions.get("others", [])):
+                areas[f"other{index}"] = read_ranks(grab(sct, box))
+            seen = tuple(tuple(ranks) for ranks in areas.values())
+            # Require two identical reads in a row so mid-animation frames are ignored.
+            stable, pending = seen == pending, seen
+            if stable and seen != shown:
+                shown = seen
+                probs = FULL_DECK
+                if tracker is not None:
+                    tracker.observe(areas)
+                    shoe = tracker.current_shoe()
+                    probs = shoe.probs()
+                text = _advice_text(areas["player"], areas["dealer"], rules, probs)
+                if tracker is not None:
+                    text += "\n" + _count_text(shoe, rules)
+                    if tracker.overdrawn:
+                        text += "\n!! Saw more cards than the shoe holds - reshuffled?"
+                print(text + "\n", flush=True)
+            time.sleep(args.interval)
     except KeyboardInterrupt:
         pass
     return 0
-
-
-class _Overlay:
-    """Small always-on-top window showing the current advice."""
-
-    def __init__(self, on_reset=None):
-        import tkinter as tk
-
-        self.root = tk.Tk()
-        self.root.title("Blackjack advisor")
-        self.root.attributes("-topmost", True)
-        self.root.configure(bg="#101418")
-        self.action = tk.Label(self.root, text="Waiting...", font=("Arial", 28, "bold"),
-                               fg="#ffd84a", bg="#101418", padx=16, pady=6)
-        self.action.pack(anchor="w")
-        self.detail = tk.Label(self.root, text="", font=("Courier", 12), justify="left",
-                               fg="#e8e8e8", bg="#101418", padx=16, pady=8)
-        self.detail.pack(anchor="w")
-        if on_reset:
-            tk.Button(self.root, text="New shoe (dealer shuffled): reset count",
-                      command=on_reset).pack(fill="x", padx=16, pady=(0, 12))
-
-    def show(self, text: str) -> None:
-        lines = text.split("\n")
-        headline = next((ln[4:] for ln in lines if ln.startswith(">>> ")), lines[0])
-        rest = [ln.strip() for ln in lines if not ln.startswith(">>> ")]
-        self.action.configure(text=headline.split("   ")[0])
-        self.detail.configure(text="\n".join(rest) if headline != lines[0] else "")
 
 
 # --------------------------------------------------------------------------
@@ -338,14 +197,14 @@ def main(argv: list[str] | None = None) -> int:
                        help="ignore seen cards (for games that reshuffle every hand)")
 
     parser = argparse.ArgumentParser(prog="blackjack_bot", description=__doc__)
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
 
     p = sub.add_parser("calibrate", help="mark the dealer and player card areas on screen")
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     p.add_argument("--monitor", type=int, default=1, help="monitor number (1 = primary)")
     p.set_defaults(func=cmd_calibrate)
 
-    p = sub.add_parser("run", parents=[rules, count], help="watch the screen and show the best play")
+    p = sub.add_parser("run", parents=[rules, count], help="open the advisor window (the default)")
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     p.add_argument("--interval", type=float, default=0.4, help="seconds between screen reads")
     p.add_argument("--no-overlay", action="store_true", help="print to the terminal only")
@@ -364,6 +223,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="another player's card area (repeatable)")
     p.set_defaults(func=cmd_image)
 
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv or (argv[0].startswith("-") and argv[0] not in ("-h", "--help")):
+        argv = ["run", *argv]  # no command: just open the window
     args = parser.parse_args(argv)
     try:
         return args.func(args)

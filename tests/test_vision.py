@@ -73,3 +73,8 @@ def test_uncertain_glyph_is_not_guessed():
     blob = np.full((40, 30), 255, np.uint8)
     blob[5:35, 5:25] = 0  # a solid block is not a rank
     assert classify_glyph(blob) == ""
+
+
+def test_card_cut_off_by_the_area_is_not_read():
+    image = draw_hand(["A", "7"], fan=0.4)
+    assert read_ranks(image[38:]) == ["?"]  # top of the cards is outside the area

@@ -24,39 +24,36 @@ On Linux the overlay window also needs Tk (`sudo apt install python3-tk python3-
 
 ## Use
 
-1. Open the game so the table is visible, then mark where the cards are:
+![The advisor window](docs/window.png)
+
+1. Open your blackjack game so the table is visible.
+2. Start the bot. Either double-click `start_bot.bat` (Windows) or
+   `start_bot.command` (Mac), or run:
 
    ```bash
-   python -m blackjack_bot calibrate
+   python -m blackjack_bot
    ```
 
-   Drag a box around the dealer's cards, then your cards, then one box per
-   other player. Press Enter (or right-click) when done. Make each box big
-   enough to hold a hand after several hits.
+   A window opens and stays on top of your game. Drag it somewhere it does not
+   cover the cards.
+3. Click **Set up card areas**. Your screen freezes: drag a box around the
+   dealer's cards, then your cards, then one box per other player, and press
+   Enter (or right-click). Make each box big enough to hold a hand after
+   several hits, with the whole card inside it. This is saved for next time.
+4. Play. The window shows:
+   - the move to make, in large letters (HIT, STAND, DOUBLE, SPLIT, SURRENDER);
+   - the cards it sees for the dealer, you and the other players;
+   - your win / push / lose odds, and the expected result of every move
+     (`-0.107` means losing 10.7% of your bet on average);
+   - the card count, and whether to raise your bet on the next hand.
+5. When the dealer shuffles, click **New shoe (shuffle)** to reset the count.
 
-2. Start it:
+The tick boxes set the table rules; **Decks** is the number of decks in the shoe.
+Untick **Count cards** for games that reshuffle every hand.
 
-   ```bash
-   python -m blackjack_bot run --decks 6
-   ```
+### Command-line options
 
-   A small always-on-top window shows the play. When the dealer shuffles, click
-   **New shoe** to reset the count.
-
-Example output:
-
-```
-You: 10 6  (hard 16)    Dealer: 10
->>> SURRENDER   (EV -0.500 bets)
-    surrender -0.500   stand -0.553   hit -0.555   double -1.111
-    Surrender: give up half the bet. If not offered, STAND.
-Count: running +9   true +1.6   5.6 decks left (19 cards seen)
-Next-hand edge: +0.37%  (about even: small bet)
-```
-
-EV is in bets: `-0.107` means you lose 10.7% of your bet on average with that move.
-
-### Options
+The same settings can be given when starting, e.g. `python -m blackjack_bot --decks 8 --h17`.
 
 | Option | Meaning |
 | --- | --- |
@@ -66,7 +63,7 @@ EV is in bets: `-0.107` means you lose 10.7% of your bet on average with that mo
 | `--no-das` | no double after split |
 | `--no-surrender` | surrender is not offered |
 | `--bj-payout 1.2` | blackjack pays 6:5 instead of 3:2 |
-| `--no-overlay` | print to the terminal only |
+| `--no-overlay` | no window; print to the terminal |
 | `--interval 0.4` | seconds between screen reads |
 
 ### Other commands

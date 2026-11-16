@@ -122,6 +122,11 @@ def read_ranks(bgr: np.ndarray, debug: list | None = None) -> list[str]:
 
     ranks: list[tuple[int, str]] = []
     for (x, y, w, h), mask in blobs:
+        if x <= 1 or y <= 1:
+            # The card runs off the top/left of the area, so its rank may be cut
+            # off. A clipped rank can look like another one: don't read it.
+            ranks.append((x, "?"))
+            continue
         band_h = int(0.40 * h)
         ink = cv2.bitwise_and(mask, cv2.bitwise_not(white))[y:y + band_h, x:x + w]
         face = white[y:y + band_h, x:x + w]
